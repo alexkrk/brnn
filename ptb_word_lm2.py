@@ -73,7 +73,7 @@ class DenseBBB(object):
 			                                initializer=tf.random_uniform_initializer(
 				                                -self.init_scale, self.init_scale))
 
-			self.log_theta_std = tf.get_variable('logstd_mu', theta_shape, tf.float32,
+			self.log_theta_std = tf.get_variable('logstd_theta', theta_shape, tf.float32,
 			                                     initializer=tf.random_normal_initializer(mean=-5.,
 			                                                                              stddev=1e-3))
 			# Point estimate for the bias
@@ -137,7 +137,7 @@ class BayesianLSTM(tf.contrib.rnn.BasicLSTMCell):
 			                                initializer=tf.random_uniform_initializer(
 				                                -self.init_scale, self.init_scale))
 
-			self.log_theta_std = tf.get_variable('logstd_mu', theta_shape, tf.float32,
+			self.log_theta_std = tf.get_variable('logstd_theta', theta_shape, tf.float32,
 			                                     initializer=tf.random_normal_initializer(mean=-5.,
 			                                                                              stddev=1e-3))
 			# Point estimate for the bias
