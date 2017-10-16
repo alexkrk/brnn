@@ -22,7 +22,7 @@ parser.add_argument('-data_path', type=str, default='./data/simple-examples/data
 parser.add_argument('-save_path', type=str, default='./model/saved')
 parser.add_argument('-prior_pi', type=float, default=0.25)
 parser.add_argument('-log_sigma1', type=float, default=-1.0)
-parser.add_argument('-log_sigma2', type=float, default=-8.0)
+parser.add_argument('-log_sigma2', type=float, default=-7.0)
 parser.add_argument('-inference_mode', type=str, default='sample')
 parser.add_argument('-b_stochastic', type=int, default=1)
 FLAGS = parser.parse_args()
@@ -77,8 +77,7 @@ def get_bbb_variable(shape, name, prior, is_training):
 
 	rho_max_init = math.log(math.exp(prior.sigma_mix / 1.0) - 1.0)
 	rho_min_init = math.log(math.exp(prior.sigma_mix / 2.0) - 1.0)
-	init = tf.random_uniform_initializer(rho_min_init,
-	                                     rho_max_init)
+	init = tf.random_uniform_initializer(rho_min_init, rho_max_init)
 
 	with tf.variable_scope('BBB', reuse=not is_training):
 		rho = tf.get_variable(
@@ -94,7 +93,7 @@ def get_bbb_variable(shape, name, prior, is_training):
 		return output
 
 	sample = output
-	kl = compute_kl(shape, mu, sigma, prior, sample)
+	kl = compute_kl(mu, sigma, prior, sample)
 	# kl = compute_kl(shape, tf.reshape(mu, [-1]), tf.reshape(sigma, [-1]), prior, sample)
 	tf.add_to_collection('KL_layers', kl)
 	return output
@@ -105,14 +104,16 @@ class Prior(object):
 		self.pi = pi
 		self.log_sigma1 = log_sigma1
 		self.log_sigma2 = log_sigma2
-		self.sigma_mix = pi * math.exp(log_sigma1) + (1. - pi) * math.exp(log_sigma2)
+
+		sigma_one, sigma_two = math.exp(log_sigma1), math.exp(log_sigma2)
+		self.sigma_mix = np.sqrt(pi * np.square(sigma_one) + (1.0 - pi) * np.square(sigma_two))
 
 	def get_logp(self, sample):
 		var1, var2 = tf.exp(2 * self.log_sigma1), tf.exp(2 * self.log_sigma2)
 		return tf.log(normal_mix(sample, self.pi, 0., 0., var1, var2))
 
 
-def compute_kl(shape, mu, sigma, prior, sample):
+def compute_kl(mu, sigma, prior, sample):
 	logp = prior.get_logp(sample)
 	logq = tf.log((1.0 / tf.sqrt(2.0 * tf.square(sigma) * math.pi)) * tf.exp(
 		-tf.square(sample - mu) / (2.0 * tf.square(sigma))))
@@ -198,13 +199,12 @@ class PTBModel(object):
 		size = config.hidden_size
 		vocab_size = config.vocab_size
 
-		with tf.device("/cpu:0"):
-			embedding = tf.get_variable(
-				"embedding", [vocab_size, size], tf.float32)
-			inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
-
 		# Construct prior
 		prior = Prior(config.prior_pi, config.log_sigma1, config.log_sigma2)
+
+		with tf.device("/cpu:0"):
+			embedding = get_bbb_variable([vocab_size, size], 'embedding', prior, is_training)
+			inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
 
 		# Build the BBB LSTM cells
 		cells = []
@@ -265,15 +265,11 @@ class PTBModel(object):
 
 		# Compute KL divergence for each cell and the projection layer
 		# KL is scaled by 1./(B*C) as in the paper
-		C = self._input.epoch_size
-		B = self.batch_size
-		scaling = 1. / (B * C)
-
+		kl_const = self._input.epoch_size
 		kl_div = tf.add_n(tf.get_collection('KL_layers'), 'kl_divergence')
-		kl_div *= scaling
 
 		# ELBO
-		self._total_loss = self._cost + kl_div
+		self._total_loss = self._cost + 1. / self.batch_size * kl_div * 1. / kl_const
 
 		# Learning rate & optimization
 		self._lr = tf.Variable(0.0, trainable=False)
@@ -379,6 +375,7 @@ class SmallConfig(object):
 	vocab_size = 10000
 
 
+#
 # class MediumConfig(object):
 # 	"""Medium config."""
 # 	init_scale = 0.05
@@ -394,6 +391,7 @@ class SmallConfig(object):
 # 	batch_size = 20
 # 	vocab_size = 10000
 
+
 class MediumConfig(object):
 	"""Medium config."""
 	init_scale = 0.05
@@ -403,7 +401,7 @@ class MediumConfig(object):
 	num_steps = 35
 	hidden_size = 650
 	max_epoch = 20
-	max_max_epoch = 70
+	max_max_epoch = 60
 	keep_prob = 1.0
 	lr_decay = 0.9
 	batch_size = 20
@@ -490,26 +488,26 @@ def run():
 	eval_config.num_steps = 1
 
 	with tf.Graph().as_default():
-		initializer = tf.random_uniform_initializer(-config.init_scale,
-		                                            config.init_scale)
+		# initializer = tf.random_uniform_initializer(-config.init_scale,
+		#                                             config.init_scale)
 
 		with tf.name_scope("Train"):
 			train_input = PTBInput(config=config, data=train_data, name="TrainInput")
-			with tf.variable_scope("Model", reuse=None, initializer=initializer):
+			with tf.variable_scope("Model", reuse=None, initializer=None):
 				m = PTBModel(is_training=True, config=config, input_=train_input)
 			tf.summary.scalar("Training Loss", m.cost)
 			tf.summary.scalar("Learning Rate", m.lr)
 
 		with tf.name_scope("Valid"):
 			valid_input = PTBInput(config=config, data=valid_data, name="ValidInput")
-			with tf.variable_scope("Model", reuse=True, initializer=initializer):
+			with tf.variable_scope("Model", reuse=True, initializer=None):
 				mvalid = PTBModel(is_training=False, config=config, input_=valid_input)
 			tf.summary.scalar("Validation Loss", mvalid.cost)
 
 		with tf.name_scope("Test"):
 			test_input = PTBInput(
 				config=eval_config, data=test_data, name="TestInput")
-			with tf.variable_scope("Model", reuse=True, initializer=initializer):
+			with tf.variable_scope("Model", reuse=True, initializer=None):
 				mtest = PTBModel(is_training=False, config=eval_config,
 				                 input_=test_input)
 
