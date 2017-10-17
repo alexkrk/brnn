@@ -10,11 +10,6 @@ import reader
 import util
 import argparse
 
-"""
-To obtain data:
-mkdir data && cd data && wget http://www.fit.vutbr.cz/~imikolov/rnnlm/simple-examples.tgz && tar xvf simple-examples.tgz
-"""
-
 parser = argparse.ArgumentParser()
 parser.add_argument('-model', type=str, default='small',
                     choices=['small', 'medium', 'large', 'test'])
@@ -94,7 +89,6 @@ def get_bbb_variable(shape, name, prior, is_training):
 
 	sample = output
 	kl = compute_kl(mu, sigma, prior, sample)
-	# kl = compute_kl(shape, tf.reshape(mu, [-1]), tf.reshape(sigma, [-1]), prior, sample)
 	tf.add_to_collection('KL_layers', kl)
 	return output
 
@@ -269,7 +263,8 @@ class PTBModel(object):
 		kl_div = tf.add_n(tf.get_collection('KL_layers'), 'kl_divergence')
 
 		# ELBO
-		self._total_loss = self._cost + 1. / self.batch_size * kl_div * 1. / kl_const
+		self.kl_div = 1. / self.batch_size * kl_div * 1. / kl_const
+		self._total_loss = self._cost + self.kl_div
 
 		# Learning rate & optimization
 		self._lr = tf.Variable(0.0, trainable=False)
@@ -375,25 +370,11 @@ class SmallConfig(object):
 	vocab_size = 10000
 
 
-#
-# class MediumConfig(object):
-# 	"""Medium config."""
-# 	init_scale = 0.05
-# 	learning_rate = 1.0
-# 	max_grad_norm = 5
-# 	num_layers = 2
-# 	num_steps = 35
-# 	hidden_size = 650
-# 	max_epoch = 6
-# 	max_max_epoch = 39
-# 	keep_prob = 0.5
-# 	lr_decay = 0.8
-# 	batch_size = 20
-# 	vocab_size = 10000
-
-
 class MediumConfig(object):
-	"""Medium config."""
+	"""
+	Medium config.
+	Slightly modified according to email.
+	"""
 	init_scale = 0.05
 	learning_rate = 1.0
 	max_grad_norm = 5
@@ -450,6 +431,7 @@ def run_epoch(session, model, eval_op=None, verbose=False):
 	fetches = {
 		"cost": model.cost,
 		"final_state": model.final_state,
+		"kl_divergence": model.kl_div
 	}
 	if eval_op is not None:
 		fetches["eval_op"] = eval_op
@@ -472,6 +454,8 @@ def run_epoch(session, model, eval_op=None, verbose=False):
 			      (step * 1.0 / model.input.epoch_size, np.exp(costs / iters),
 			       iters * model.input.batch_size / (time.time() - start_time)))
 
+			print("KL is {}".format(vals["kl_divergence"]))
+
 	return np.exp(costs / iters)
 
 
@@ -488,26 +472,26 @@ def run():
 	eval_config.num_steps = 1
 
 	with tf.Graph().as_default():
-		# initializer = tf.random_uniform_initializer(-config.init_scale,
-		#                                             config.init_scale)
+		initializer = tf.random_uniform_initializer(-config.init_scale,
+		                                            config.init_scale)
 
 		with tf.name_scope("Train"):
 			train_input = PTBInput(config=config, data=train_data, name="TrainInput")
-			with tf.variable_scope("Model", reuse=None, initializer=None):
+			with tf.variable_scope("Model", reuse=None, initializer=initializer):
 				m = PTBModel(is_training=True, config=config, input_=train_input)
 			tf.summary.scalar("Training Loss", m.cost)
 			tf.summary.scalar("Learning Rate", m.lr)
 
 		with tf.name_scope("Valid"):
 			valid_input = PTBInput(config=config, data=valid_data, name="ValidInput")
-			with tf.variable_scope("Model", reuse=True, initializer=None):
+			with tf.variable_scope("Model", reuse=True, initializer=initializer):
 				mvalid = PTBModel(is_training=False, config=config, input_=valid_input)
 			tf.summary.scalar("Validation Loss", mvalid.cost)
 
 		with tf.name_scope("Test"):
 			test_input = PTBInput(
 				config=eval_config, data=test_data, name="TestInput")
-			with tf.variable_scope("Model", reuse=True, initializer=None):
+			with tf.variable_scope("Model", reuse=True, initializer=initializer):
 				mtest = PTBModel(is_training=False, config=eval_config,
 				                 input_=test_input)
 
