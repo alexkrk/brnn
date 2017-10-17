@@ -20,6 +20,7 @@ parser.add_argument('-log_sigma1', type=float, default=-1.0)
 parser.add_argument('-log_sigma2', type=float, default=-7.0)
 parser.add_argument('-inference_mode', type=str, default='sample')
 parser.add_argument('-b_stochastic', type=int, default=1)
+parser.add_argument('-random_seed', type=int, default=12)
 FLAGS = parser.parse_args()
 FLAGS.b_stochastic = bool(FLAGS.b_stochastic)
 
@@ -459,9 +460,17 @@ def run_epoch(session, model, eval_op=None, verbose=False):
 	return np.exp(costs / iters)
 
 
+def change_random_seed(seed):
+	global prng
+	prng = np.random.RandomState(seed)
+	tf.set_random_seed(seed)
+
+
 def run():
 	if not FLAGS.data_path:
 		raise ValueError("Must set --data_path to PTB data directory")
+
+	change_random_seed(FLAGS.random_seed)
 
 	raw_data = reader.ptb_raw_data(FLAGS.data_path)
 	train_data, valid_data, test_data, _ = raw_data
