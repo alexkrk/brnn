@@ -253,6 +253,7 @@ class PTBModel(object):
 
 		# Update the cost
 		self._cost = tf.reduce_sum(loss)
+		self._kl_div = 0.
 		self._final_state = state
 
 		if not is_training:
@@ -264,8 +265,8 @@ class PTBModel(object):
 		kl_div = tf.add_n(tf.get_collection('KL_layers'), 'kl_divergence')
 
 		# ELBO
-		self.kl_div = 1. / self.batch_size * kl_div * 1. / kl_const
-		self._total_loss = self._cost + self.kl_div
+		self._kl_div = 1. / self.batch_size * kl_div * 1. / kl_const
+		self._total_loss = self._cost + self._kl_div
 
 		# Learning rate & optimization
 		self._lr = tf.Variable(0.0, trainable=False)
@@ -287,7 +288,8 @@ class PTBModel(object):
 	def export_ops(self, name):
 		"""Exports ops to collections."""
 		self._name = name
-		ops = {util.with_prefix(self._name, "cost"): self._cost}
+		ops = {util.with_prefix(self._name, "cost"): self._cost,
+		       util.with_prefix(self._name, "kl_div"): self._kl_div}
 		if self._is_training:
 			ops.update(lr=self._lr, new_lr=self._new_lr, lr_update=self._lr_update)
 			if self._rnn_params:
@@ -316,6 +318,7 @@ class PTBModel(object):
 					base_variable_scope="Model/RNN")
 				tf.add_to_collection(tf.GraphKeys.SAVEABLE_OBJECTS, params_saveable)
 		self._cost = tf.get_collection_ref(util.with_prefix(self._name, "cost"))[0]
+		self._kl_div = tf.get_collection_ref(util.with_prefix(self._name, "kl_div"))[0]
 		num_replicas = 1
 		self._initial_state = util.import_state_tuples(
 			self._initial_state, self._initial_state_name, num_replicas)
@@ -353,6 +356,10 @@ class PTBModel(object):
 	@property
 	def final_state_name(self):
 		return self._final_state_name
+
+	@property
+	def kl_div(self):
+		return self._kl_div if self._is_training else tf.constant(0.)
 
 
 class SmallConfig(object):
@@ -432,10 +439,10 @@ def run_epoch(session, model, eval_op=None, verbose=False):
 	fetches = {
 		"cost": model.cost,
 		"final_state": model.final_state,
-		"kl_divergence": model.kl_div
 	}
 	if eval_op is not None:
 		fetches["eval_op"] = eval_op
+		fetches["kl_divergence"] = model.kl_div
 
 	for step in range(model.input.epoch_size):
 		feed_dict = {}
@@ -455,7 +462,8 @@ def run_epoch(session, model, eval_op=None, verbose=False):
 			      (step * 1.0 / model.input.epoch_size, np.exp(costs / iters),
 			       iters * model.input.batch_size / (time.time() - start_time)))
 
-			print("KL is {}".format(vals["kl_divergence"]))
+			if model._is_training:
+				print("KL is {}".format(vals["kl_divergence"]))
 
 	return np.exp(costs / iters)
 
