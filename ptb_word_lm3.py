@@ -25,6 +25,26 @@ FLAGS = parser.parse_args()
 FLAGS.b_stochastic = bool(FLAGS.b_stochastic)
 
 
+def data_type():
+	return tf.float32
+
+
+# Helpers
+def logsum_mog(x, pi, mu1, mu2, sigma1, sigma2):
+	return log_sum_exp(tf.log(pi) + log_normal(x, mu1, sigma1),
+	                   tf.log(1. - pi) + log_normal(x, mu2, sigma2))
+
+
+def log_sum_exp(u, v):
+	m = tf.maximum(u, v)
+	return m + tf.log(tf.exp(u - m) + tf.exp(v - m))
+
+
+def log_normal(x, mu, sigma):
+	return -0.5 * tf.log(2.0 * math.pi) - tf.log(tf.abs(sigma)) - tf.square((x - mu)) / (
+		2 * tf.square(sigma))
+
+
 def get_config():
 	"""Get model config."""
 	config = None
@@ -69,7 +89,7 @@ def get_bbb_variable(shape, name, prior, is_training):
 
 	# No initializer specified -> will use the U(-scale, scale) init from main()
 	with tf.variable_scope('BBB', reuse=not is_training):
-		mu = tf.get_variable(name + '_mean', shape, dtype=tf.float32)
+		mu = tf.get_variable(name + '_mean', shape, dtype=data_type())
 
 	rho_max_init = math.log(math.exp(prior.sigma_mix / 1.0) - 1.0)
 	rho_min_init = math.log(math.exp(prior.sigma_mix / 2.0) - 1.0)
@@ -77,7 +97,7 @@ def get_bbb_variable(shape, name, prior, is_training):
 
 	with tf.variable_scope('BBB', reuse=not is_training):
 		rho = tf.get_variable(
-			name + '_rho', shape, dtype=tf.float32, initializer=init)
+			name + '_rho', shape, dtype=data_type(), initializer=init)
 
 	if is_training or FLAGS.inference_mode == 'sample':
 		epsilon = tf.contrib.distributions.Normal(0.0, 1.0).sample(shape)
@@ -88,8 +108,11 @@ def get_bbb_variable(shape, name, prior, is_training):
 	if not is_training:
 		return output
 
+	tf.summary.histogram(name + '_rho_hist', rho)
+	tf.summary.histogram(name + '_mu_hist', mu)
+
 	sample = output
-	kl = compute_kl(mu, sigma, prior, sample)
+	kl = compute_kl(mu, sigma, prior, sample, name)
 	tf.add_to_collection('KL_layers', kl)
 	return output
 
@@ -104,28 +127,18 @@ class Prior(object):
 		self.sigma_mix = np.sqrt(pi * np.square(sigma_one) + (1.0 - pi) * np.square(sigma_two))
 
 	def get_logp(self, sample):
-		var1, var2 = tf.exp(2 * self.log_sigma1), tf.exp(2 * self.log_sigma2)
-		return tf.log(normal_mix(sample, self.pi, 0., 0., var1, var2))
+		sigma1, sigma2 = tf.exp(self.log_sigma1), tf.exp(self.log_sigma2)
+		return logsum_mog(sample, self.pi, 0., 0., sigma1, sigma2)
 
 
-def compute_kl(mu, sigma, prior, sample):
+def compute_kl(mu, sigma, prior, sample, name):
 	logp = prior.get_logp(sample)
-	logq = tf.log((1.0 / tf.sqrt(2.0 * tf.square(sigma) * math.pi)) * tf.exp(
-		-tf.square(sample - mu) / (2.0 * tf.square(sigma))))
+	logq = log_normal(sample, mu, sigma)
+	kl = tf.reduce_sum(logq - logp)
 
-	return tf.reduce_sum(logq - logp)
-
-
-def normal_mix(samples, pi, mean1, mean2, var1, var2):
-	"""
-	Compute p(\theta) = pi * N(0, std1^{2}) + (1-pi) * N(0, std2^{2}).
-	"""
-	gaussian1 = (1.0 / tf.sqrt(2.0 * var1 * math.pi)) * tf.exp(
-		- tf.square(samples - mean1) / (2.0 * var1))
-	gaussian2 = (1.0 / tf.sqrt(2.0 * var2 * math.pi)) * tf.exp(
-		- tf.square(samples - mean2) / (2.0 * var2))
-	mixture = (pi * gaussian1) + ((1. - pi) * gaussian2)
-	return mixture
+	tf.summary.histogram(name + '_log_p', logp)
+	tf.summary.histogram(name + '_log_q', logq)
+	return kl
 
 
 class BayesianLSTM(tf.contrib.rnn.BasicLSTMCell):
@@ -211,12 +224,13 @@ class PTBModel(object):
 				b = get_bbb_variable(b_shape, 'b_{}'.format(i), prior, is_training)
 			else:
 				# Note: Reuse is passed down from variable scope in main()
-				b = tf.get_variable('b_{}'.format(i), b_shape, tf.float32,
+				b = tf.get_variable('b_{}'.format(i), b_shape, data_type(),
 				                    tf.constant_initializer(0.))
-			cells.append(BayesianLSTM(config.hidden_size, theta, b, forget_bias=0.0))
+			cells.append(BayesianLSTM(config.hidden_size, theta, b, forget_bias=0.0,
+			                          name='bbb_lstm_{}'.format(i)))
 
 		cell = tf.contrib.rnn.MultiRNNCell(cells, state_is_tuple=True)
-		self._initial_state = cell.zero_state(config.batch_size, tf.float32)
+		self._initial_state = cell.zero_state(config.batch_size, data_type())
 		state = self._initial_state
 
 		# Forward pass for the truncated mini-batch
@@ -235,7 +249,7 @@ class PTBModel(object):
 		if config.b_stochastic:
 			softmax_b = get_bbb_variable(softmax_b_shape, 'softmax_b', prior, is_training)
 		else:
-			softmax_b = tf.get_variable('softmax_b', softmax_b_shape, tf.float32,
+			softmax_b = tf.get_variable('softmax_b', softmax_b_shape, data_type(),
 			                            tf.constant_initializer(0.))
 
 		logits = tf.nn.xw_plus_b(output, softmax_w, softmax_b)
@@ -247,7 +261,7 @@ class PTBModel(object):
 		loss = tf.contrib.seq2seq.sequence_loss(
 			logits,
 			input_.targets,
-			tf.ones([self.batch_size, self.num_steps], dtype=tf.float32),
+			tf.ones([self.batch_size, self.num_steps], dtype=data_type()),
 			average_across_timesteps=False,
 			average_across_batch=True)
 
@@ -265,7 +279,7 @@ class PTBModel(object):
 		kl_div = tf.add_n(tf.get_collection('KL_layers'), 'kl_divergence')
 
 		# ELBO
-		self._kl_div = 1. / self.batch_size * kl_div * 1. / kl_const
+		self._kl_div = (1. / self.batch_size) * kl_div * (1. / kl_const)
 		self._total_loss = self._cost + self._kl_div
 
 		# Learning rate & optimization
@@ -279,7 +293,7 @@ class PTBModel(object):
 			global_step=tf.contrib.framework.get_or_create_global_step())
 
 		self._new_lr = tf.placeholder(
-			tf.float32, shape=[], name="new_learning_rate")
+			data_type(), shape=[], name="new_learning_rate")
 		self._lr_update = tf.assign(self._lr, self._new_lr)
 
 	def assign_lr(self, session, lr_value):
