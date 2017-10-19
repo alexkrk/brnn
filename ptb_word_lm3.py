@@ -290,7 +290,7 @@ class PTBModel(object):
 		if not is_training:
 			return
 
-		# Compute KL divergence for each cell and the projection layer
+		# Compute KL divergence for each cell, projection layer and embedding layer.
 		# KL is scaled by 1./(B*C) as in the paper
 		kl_const = self._input.epoch_size
 		kl_div = tf.add_n(tf.get_collection('KL_layers'), 'kl_divergence')
