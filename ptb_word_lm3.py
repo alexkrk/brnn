@@ -45,6 +45,18 @@ def log_normal(x, mu, sigma):
 		2 * tf.square(sigma))
 
 
+def compute_KL(shape, mu, sigma, prior, sample):
+	posterior = tf.contrib.distributions.Normal(mu, sigma)
+	KL = tf.reduce_sum(posterior.log_prob(tf.reshape(sample, [-1])))
+	N1 = tf.contrib.distributions.Normal(0.0, prior.sigma1)
+	N2 = tf.contrib.distributions.Normal(0.0, prior.sigma2)
+	mix1 = tf.reduce_sum(N1.log_prob(sample), 1) + tf.log(prior.pi_mixture)
+	mix2 = tf.reduce_sum(N2.log_prob(sample), 1) + tf.log(1.0 - prior.pi_mixture)
+	prior_mix = tf.stack([mix1, mix2])
+	KL += -tf.reduce_sum(tf.reduce_logsumexp(prior_mix, [0]))
+	return KL
+
+
 def get_config():
 	"""Get model config."""
 	config = None
@@ -105,30 +117,35 @@ def get_bbb_variable(shape, name, prior, is_training):
 		output = mu + sigma * epsilon
 	else:
 		output = mu
+
 	if not is_training:
 		return output
 
 	tf.summary.histogram(name + '_rho_hist', rho)
 	tf.summary.histogram(name + '_mu_hist', mu)
+	tf.summary.histogram(name + '_sigma_hist', sigma)
 
 	sample = output
-	kl = compute_kl(mu, sigma, prior, sample, name)
+	# kl = compute_kl(mu, sigma, prior, sample, name)
+	kl = compute_KL(shape, tf.reshape(mu, [-1]), tf.reshape(sigma, [-1]), prior, sample)
 	tf.add_to_collection('KL_layers', kl)
 	return output
 
 
 class Prior(object):
 	def __init__(self, pi, log_sigma1, log_sigma2):
-		self.pi = pi
+		self.pi_mixture = pi
 		self.log_sigma1 = log_sigma1
 		self.log_sigma2 = log_sigma2
+		self.sigma1 = tf.exp(log_sigma1)
+		self.sigma2 = tf.exp(log_sigma2)
 
 		sigma_one, sigma_two = math.exp(log_sigma1), math.exp(log_sigma2)
 		self.sigma_mix = np.sqrt(pi * np.square(sigma_one) + (1.0 - pi) * np.square(sigma_two))
 
 	def get_logp(self, sample):
 		sigma1, sigma2 = tf.exp(self.log_sigma1), tf.exp(self.log_sigma2)
-		return logsum_mog(sample, self.pi, 0., 0., sigma1, sigma2)
+		return logsum_mog(sample, self.pi_mixture, 0., 0., sigma1, sigma2)
 
 
 def compute_kl(mu, sigma, prior, sample, name):
@@ -161,7 +178,7 @@ class BayesianLSTM(tf.contrib.rnn.BasicLSTMCell):
 		Forward pass in the LSTM.
 		"""
 		xh = tf.concat([inputs, h], 1)
-		out = tf.matmul(xh, self.theta) + self.b
+		out = tf.matmul(xh, self.theta) + tf.squeeze(self.b)
 		return out
 
 	def call(self, inputs, state):
@@ -217,7 +234,7 @@ class PTBModel(object):
 		# Build the BBB LSTM cells
 		cells = []
 		theta_shape = (size + config.hidden_size, 4 * config.hidden_size)
-		b_shape = (4 * config.hidden_size)
+		b_shape = (4 * config.hidden_size, 1)
 		for i in range(config.num_layers):
 			theta = get_bbb_variable(theta_shape, 'theta_{}'.format(i), prior, is_training)
 			if config.b_stochastic:
@@ -243,7 +260,7 @@ class PTBModel(object):
 
 		# Softmax BBB output projection layer
 		softmax_w_shape = (size, vocab_size)
-		softmax_b_shape = (vocab_size,)
+		softmax_b_shape = (vocab_size, 1)
 		softmax_w = get_bbb_variable(softmax_w_shape, 'softmax_w', prior, is_training)
 
 		if config.b_stochastic:
@@ -252,7 +269,7 @@ class PTBModel(object):
 			softmax_b = tf.get_variable('softmax_b', softmax_b_shape, data_type(),
 			                            tf.constant_initializer(0.))
 
-		logits = tf.nn.xw_plus_b(output, softmax_w, softmax_b)
+		logits = tf.nn.xw_plus_b(output, softmax_w, tf.squeeze(softmax_b))
 
 		# Reshape logits to be a 3-D tensor for sequence loss
 		logits = tf.reshape(logits, [self.batch_size, self.num_steps, vocab_size])
