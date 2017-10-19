@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-model', type=str, default='small',
                     choices=['small', 'medium', 'large', 'test'])
 parser.add_argument('-data_path', type=str, default='./data/simple-examples/data')
-parser.add_argument('-save_path', type=str, default='./model/saved')
+parser.add_argument('-save_path', type=str, default='./model/saved_new')
 parser.add_argument('-prior_pi', type=float, default=0.25)
 parser.add_argument('-log_sigma1', type=float, default=-1.0)
 parser.add_argument('-log_sigma2', type=float, default=-7.0)
@@ -280,10 +280,10 @@ class PTBModel(object):
 			input_.targets,
 			tf.ones([self.batch_size, self.num_steps], dtype=data_type()),
 			average_across_timesteps=False,
-			average_across_batch=True)
+			average_across_batch=False)
 
 		# Update the cost
-		self._cost = tf.reduce_sum(loss)
+		self._cost = tf.reduce_sum(loss) / self.batch_size
 		self._kl_div = 0.
 		self._final_state = state
 
